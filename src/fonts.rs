@@ -82,7 +82,7 @@ use crate::Mm;
 /// [`FontFamily`]: struct.FontFamily.html
 #[derive(Debug)]
 pub struct FontCache {
-    fonts: Vec<FontData>,
+    pub(crate) fonts: Vec<FontData>,
     pdf_fonts: Vec<printpdf::IndirectFontRef>,
     // We have to use an option because we first have to construct the FontCache before we can load
     // a font, but the default font is always loaded in new, so this options is always some
@@ -186,8 +186,15 @@ impl FontCache {
 /// [`FontCache`]: struct.FontCache.html
 #[derive(Clone, Debug)]
 pub struct FontData {
+    /// The rusttype font used for metrics (glyph widths, kerning).
+    /// For subset fonts, this is parsed from the FULL original font.
     rt_font: rusttype::Font<'static>,
+    /// The raw font data to embed in the PDF.
+    /// For subset fonts, this contains the SUBSET data (smaller).
     raw_data: RawFontData,
+    /// Optional glyph ID mapping for subset fonts.
+    /// Maps characters to their glyph IDs in the subset font.
+    glyph_id_map: Option<Arc<GlyphIdMap>>,
 }
 
 impl FontData {
@@ -212,7 +219,11 @@ impl FontData {
                 ErrorKind::InvalidFont,
             ))
         } else {
-            Ok(FontData { rt_font, raw_data })
+            Ok(FontData {
+                rt_font,
+                raw_data,
+                glyph_id_map: None,
+            })
         }
     }
 
@@ -236,8 +247,69 @@ impl FontData {
                 ErrorKind::InvalidFont,
             ))
         } else {
-            Ok(FontData { rt_font, raw_data })
+            Ok(FontData {
+                rt_font,
+                raw_data,
+                glyph_id_map: None,
+            })
         }
+    }
+
+    /// Creates a new FontData by cloning an existing one with different raw data.
+    /// This avoids re-parsing the font with rusttype, which is expensive for large fonts.
+    ///
+    /// # Arguments
+    /// * `source` - The FontData to clone the rusttype font from
+    /// * `embed_data` - The raw data to embed in the PDF (can be subset data)
+    /// * `glyph_id_map` - Optional glyph ID mapping for subset fonts
+    pub fn clone_with_data(
+        source: &FontData,
+        embed_data: Arc<Vec<u8>>,
+        glyph_id_map: Option<GlyphIdMap>,
+    ) -> FontData {
+        FontData {
+            rt_font: source.rt_font.clone(),
+            raw_data: RawFontData::Embedded(embed_data),
+            glyph_id_map: glyph_id_map.map(Arc::new),
+        }
+    }
+
+    /// Creates a FontData with metrics from a full font and embedding data from a subset.
+    ///
+    /// This is the key method for font subsetting. It allows:
+    /// - Using the FULL font for metrics (glyph widths, kerning) via rusttype
+    /// - Embedding the SUBSET font data in the PDF (smaller file size)
+    /// - Mapping characters to their correct glyph IDs in the subset
+    ///
+    /// # Arguments
+    /// * `metrics_data` - The FULL original font data (used by rusttype for metrics)
+    /// * `embed_data` - The SUBSET font data (embedded in PDF)
+    /// * `glyph_id_map` - Mapping from characters to their glyph IDs in the subset
+    ///
+    /// # Returns
+    /// * `Ok(FontData)` - A font that uses full metrics but embeds subset data
+    /// * `Err(Error)` - If the metrics font cannot be parsed
+    pub fn new_with_subset(
+        metrics_data: Arc<Vec<u8>>,
+        embed_data: Arc<Vec<u8>>,
+        glyph_id_map: GlyphIdMap,
+    ) -> Result<FontData, Error> {
+        // Parse the FULL font for metrics (glyph widths, kerning)
+        let rt_font = rusttype::Font::from_bytes(metrics_data.to_vec())
+            .context("Failed to read font for metrics")?;
+
+        if rt_font.units_per_em() == 0 {
+            return Err(Error::new(
+                "The font is not scalable",
+                ErrorKind::InvalidFont,
+            ));
+        }
+
+        Ok(FontData {
+            rt_font,
+            raw_data: RawFontData::Embedded(embed_data),
+            glyph_id_map: Some(Arc::new(glyph_id_map)),
+        })
     }
 
     /// Loads the font at the given path.
@@ -376,6 +448,45 @@ impl GlyphCoverage {
     /// Returns the total number of unique characters analyzed.
     pub fn total_count(&self) -> usize {
         self.total_unique
+    }
+}
+
+/// Maps characters to their glyph IDs in a subset font.
+///
+/// When a font is subset, glyph IDs are remapped to a smaller range.
+/// This struct stores the mapping from characters to their new glyph IDs
+/// in the subset font, allowing correct glyph ID lookup during PDF rendering.
+#[derive(Debug, Clone, Default)]
+pub struct GlyphIdMap {
+    mapping: std::collections::HashMap<char, u16>,
+}
+
+impl GlyphIdMap {
+    /// Creates a new empty glyph ID map.
+    pub fn new() -> Self {
+        Self {
+            mapping: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Inserts a character to glyph ID mapping.
+    pub fn insert(&mut self, c: char, subset_glyph_id: u16) {
+        self.mapping.insert(c, subset_glyph_id);
+    }
+
+    /// Gets the subset glyph ID for a character.
+    pub fn get(&self, c: char) -> Option<u16> {
+        self.mapping.get(&c).copied()
+    }
+
+    /// Returns the number of mapped characters.
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
+
+    /// Returns true if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.mapping.is_empty()
     }
 }
 
@@ -909,6 +1020,10 @@ impl Font {
 
     /// Returns the glyphs IDs for the given sequence of characters.
     ///
+    /// For subset fonts, this returns the remapped glyph IDs that correspond
+    /// to the glyphs in the subset font. For non-subset fonts, it returns
+    /// the original glyph IDs from rusttype.
+    ///
     /// The given [`FontCache`][] must be the font cache that loaded this font.
     ///
     /// [`FontCache`]: struct.FontCache.html
@@ -916,10 +1031,24 @@ impl Font {
     where
         I: IntoIterator<Item = char>,
     {
+        let font_data = &font_cache.fonts[self.idx];
         let font = font_cache.get_rt_font(*self);
-        font.glyphs_for(iter.into_iter())
-            .map(|g| g.id().0 as u16)
-            .collect()
+
+        if let Some(ref glyph_map) = font_data.glyph_id_map {
+            // Use mapped glyph IDs for subset fonts
+            iter.into_iter()
+                .map(|c| {
+                    glyph_map
+                        .get(c)
+                        .unwrap_or_else(|| font.glyph(c).id().0 as u16)
+                })
+                .collect()
+        } else {
+            // Original behavior for non-subset fonts
+            font.glyphs_for(iter.into_iter())
+                .map(|g| g.id().0 as u16)
+                .collect()
+        }
     }
 
     /// Calculate the metrics of a given font size for this font.
