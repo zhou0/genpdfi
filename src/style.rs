@@ -77,13 +77,17 @@ impl From<Color> for printpdf::Color {
     }
 }
 
-/// A text effect (bold or italic).
+/// A text effect (bold, italic, underline, or strikethrough).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
     /// Bold text.
     Bold,
     /// Italic text.
     Italic,
+    /// Underlined text.
+    Underline,
+    /// Strikethrough text.
+    Strikethrough,
 }
 
 /// A style annotation for a string.
@@ -110,6 +114,8 @@ pub struct Style {
     color: Option<Color>,
     is_bold: bool,
     is_italic: bool,
+    is_underline: bool,
+    is_strikethrough: bool,
 }
 
 impl Style {
@@ -135,6 +141,12 @@ impl Style {
         }
         if style.is_italic {
             self.is_italic = true;
+        }
+        if style.is_underline {
+            self.is_underline = true;
+        }
+        if style.is_strikethrough {
+            self.is_strikethrough = true;
         }
     }
 
@@ -162,6 +174,16 @@ impl Style {
     /// Returns whether the italic text effect is set.
     pub fn is_italic(&self) -> bool {
         self.is_italic
+    }
+
+    /// Returns whether the underline text effect is set.
+    pub fn is_underline(&self) -> bool {
+        self.is_underline
+    }
+
+    /// Returns whether the strikethrough text effect is set.
+    pub fn is_strikethrough(&self) -> bool {
+        self.is_strikethrough
     }
 
     /// Returns the font size for this style in points, or 12 if no font size is set.
@@ -193,6 +215,28 @@ impl Style {
     /// Sets the italic effect for this style and returns it.
     pub fn italic(mut self) -> Style {
         self.set_italic();
+        self
+    }
+
+    /// Sets the underline effect for this style.
+    pub fn set_underline(&mut self) {
+        self.is_underline = true;
+    }
+
+    /// Sets the underline effect for this style and returns it.
+    pub fn underline(mut self) -> Style {
+        self.set_underline();
+        self
+    }
+
+    /// Sets the strikethrough effect for this style.
+    pub fn set_strikethrough(&mut self) {
+        self.is_strikethrough = true;
+    }
+
+    /// Sets the strikethrough effect for this style and returns it.
+    pub fn strikethrough(mut self) -> Style {
+        self.set_strikethrough();
         self
     }
 
@@ -338,6 +382,8 @@ impl From<Effect> for Style {
         match effect {
             Effect::Bold => style.bold(),
             Effect::Italic => style.italic(),
+            Effect::Underline => style.underline(),
+            Effect::Strikethrough => style.strikethrough(),
         }
     }
 }

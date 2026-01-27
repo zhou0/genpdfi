@@ -756,6 +756,10 @@ impl<'f, 'p> TextSection<'f, 'p> {
         self.area.layer.set_fill_color(style.color());
         self.set_font(pdf_font, style.font_size());
 
+        // Store starting position for underline/strikethrough
+        let start_x = self.current_x_offset + self.cumulative_kerning;
+        let text_width = style.text_width(self.font_cache, s);
+
         // For built-in fonts, emit text as whole words/strings to avoid character-by-character spacing
         if font.is_builtin() {
             // Use simple text emission for built-in fonts
@@ -775,8 +779,43 @@ impl<'f, 'p> TextSection<'f, 'p> {
                 .write_positioned_codepoints(positions, codepoints);
         }
 
+        // Draw underline if enabled
+        if style.is_underline() {
+            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
+            // Position just below baseline
+            let underline_y = self.metrics.ascent + Mm(style.font_size() as f32 * 0.06);
+            let line_style = LineStyle::new()
+                .with_thickness(line_thickness)
+                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
+
+            self.area.draw_line(
+                vec![
+                    Position::new(start_x, underline_y),
+                    Position::new(start_x + text_width, underline_y),
+                ],
+                line_style,
+            );
+        }
+
+        // Draw strikethrough if enabled
+        if style.is_strikethrough() {
+            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
+            // Position at middle of x-height (roughly middle of lowercase letters)
+            let strikethrough_y = self.metrics.ascent * 0.75;
+            let line_style = LineStyle::new()
+                .with_thickness(line_thickness)
+                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
+
+            self.area.draw_line(
+                vec![
+                    Position::new(start_x, strikethrough_y),
+                    Position::new(start_x + text_width, strikethrough_y),
+                ],
+                line_style,
+            );
+        }
+
         // Update position tracking
-        let text_width = style.text_width(self.font_cache, s);
         self.current_x_offset += text_width;
 
         // For built-in fonts, we don't need kerning tracking since PDF viewers handle it
@@ -805,10 +844,8 @@ impl<'f, 'p> TextSection<'f, 'p> {
         let kerning_positions: Vec<f32> = font.kerning(self.font_cache, text.chars());
 
         // Get current cursor position, including all accumulated offsets
-        let current_pos = self.area.position(Position::new(
-            self.current_x_offset + self.cumulative_kerning,
-            0.0,
-        ));
+        let start_x = self.current_x_offset + self.cumulative_kerning;
+        let current_pos = self.area.position(Position::new(start_x, 0.0));
 
         let pdf_pos = self.area.layer.transform_position(current_pos);
         let text_width = style.text_width(self.font_cache, text);
@@ -866,6 +903,42 @@ impl<'f, 'p> TextSection<'f, 'p> {
             self.area
                 .layer
                 .write_positioned_codepoints(positions, codepoints);
+        }
+
+        // Draw underline if enabled
+        if style.is_underline() {
+            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
+            // Position just below baseline
+            let underline_y = self.metrics.ascent + Mm(style.font_size() as f32 * 0.06);
+            let line_style = LineStyle::new()
+                .with_thickness(line_thickness)
+                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
+
+            self.area.draw_line(
+                vec![
+                    Position::new(start_x, underline_y),
+                    Position::new(start_x + text_width, underline_y),
+                ],
+                line_style,
+            );
+        }
+
+        // Draw strikethrough if enabled
+        if style.is_strikethrough() {
+            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
+            // Position at middle of x-height (roughly middle of lowercase letters)
+            let strikethrough_y = self.metrics.ascent * 0.75;
+            let line_style = LineStyle::new()
+                .with_thickness(line_thickness)
+                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
+
+            self.area.draw_line(
+                vec![
+                    Position::new(start_x, strikethrough_y),
+                    Position::new(start_x + text_width, strikethrough_y),
+                ],
+                line_style,
+            );
         }
 
         // Update position tracking
