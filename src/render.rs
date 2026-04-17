@@ -1,26 +1,11 @@
 //! Low-level PDF rendering utilities.
-//!
-//! This module provides low-level abstractions over [`printpdf`][]:  A [`Renderer`][] creates a
-//! document with one or more pages with different sizes.  A [`Page`][] has one or more layers, all
-//! of the same size.  A [`Layer`][] can be used to access its [`Area`][].
-//!
-//! An [`Area`][] is a view on a full layer or on a part of a layer.  It can be used to print
-//! lines and text.  For more advanced text formatting, you can create a [`TextSection`][] from an
-//! [`Area`][].
-//!
-//! [`printpdf`]: https://docs.rs/printpdf/latest/printpdf
-//! [`Renderer`]: struct.Renderer.html
-//! [`Page`]: struct.Page.html
-//! [`Layer`]: struct.Layer.html
-//! [`Area`]: struct.Area.html
-//! [`TextSection`]: struct.TextSection.html
 
 use std::cell;
 use std::io;
 use std::ops;
 use std::rc;
 
-use crate::error::{Context as _, Error, ErrorKind};
+use crate::error::{Error, ErrorKind};
 use crate::fonts;
 use crate::style::{Color, LineStyle, Style};
 use crate::{Margins, Mm, Position, Size};
@@ -28,7 +13,7 @@ use crate::{Margins, Mm, Position, Size};
 #[cfg(feature = "images")]
 use crate::{Rotation, Scale};
 
-/// A position relative to the top left corner of a layer.
+#[derive(Debug, Clone)]
 struct LayerPosition(Position);
 
 impl LayerPosition {
@@ -37,7 +22,7 @@ impl LayerPosition {
     }
 }
 
-/// A position relative to the bottom left corner of a layer (“user space” in PDF terms).
+#[derive(Debug, Clone)]
 struct UserSpacePosition(Position);
 
 impl UserSpacePosition {
@@ -51,26 +36,23 @@ impl UserSpacePosition {
 
 impl From<UserSpacePosition> for printpdf::Point {
     fn from(pos: UserSpacePosition) -> printpdf::Point {
-        printpdf::Point::new(pos.0.x.into(), pos.0.y.into())
+        printpdf::Point {
+            x: pos.0.x.into(),
+            y: pos.0.y.into(),
+        }
     }
 }
 
 impl ops::Deref for UserSpacePosition {
     type Target = Position;
-
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 /// Renders a PDF document with one or more pages.
-///
-/// This is a wrapper around a [`printpdf::PdfDocumentReference`][].
-///
-/// [`printpdf::PdfDocumentReference`]: https://docs.rs/printpdf/0.3.2/printpdf/types/pdf_document/struct.PdfDocumentReference.html
 pub struct Renderer {
-    doc: printpdf::PdfDocumentReference,
-    // invariant: pages.len() >= 1
+    doc: printpdf::PdfDocument,
     pages: Vec<Page>,
 }
 
@@ -78,16 +60,8 @@ impl Renderer {
     /// Creates a new PDF document renderer with one page of the given size and the given title.
     pub fn new(size: impl Into<Size>, title: impl AsRef<str>) -> Result<Renderer, Error> {
         let size = size.into();
-        let (doc, page_idx, layer_idx) = printpdf::PdfDocument::new(
-            title.as_ref(),
-            size.width.into(),
-            size.height.into(),
-            "Layer 1",
-        );
-        let page_ref = doc.get_page(page_idx);
-        let layer_ref = page_ref.get_layer(layer_idx);
-        let page = Page::new(page_ref, layer_ref, size);
-
+        let doc = printpdf::PdfDocument::new(title.as_ref());
+        let page = Page::new(size, "Layer 1");
         Ok(Renderer {
             doc,
             pages: vec![page],
@@ -96,31 +70,26 @@ impl Renderer {
 
     /// Sets the PDF conformance for the generated PDF document.
     pub fn with_conformance(mut self, conformance: printpdf::PdfConformance) -> Self {
-        self.doc = self.doc.with_conformance(conformance);
+        self.doc.metadata.info.conformance = conformance;
         self
     }
 
     /// Sets the creation date for the generated PDF document.
-    pub fn with_creation_date(mut self, date: printpdf::OffsetDateTime) -> Self {
-        self.doc = self.doc.with_creation_date(date);
+    pub fn with_creation_date(mut self, date: printpdf::DateTime) -> Self {
+        self.doc.metadata.info.creation_date = date;
         self
     }
 
     /// Sets the modification date for the generated PDF document.
-    pub fn with_modification_date(mut self, date: printpdf::OffsetDateTime) -> Self {
-        self.doc = self.doc.with_mod_date(date);
+    pub fn with_modification_date(mut self, date: printpdf::DateTime) -> Self {
+        self.doc.metadata.info.modification_date = date;
         self
     }
 
     /// Adds a new page with the given size to the document.
     pub fn add_page(&mut self, size: impl Into<Size>) {
         let size = size.into();
-        let (page_idx, layer_idx) =
-            self.doc
-                .add_page(size.width.into(), size.height.into(), "Layer 1");
-        let page_ref = self.doc.get_page(page_idx);
-        let layer_ref = page_ref.get_layer(layer_idx);
-        self.pages.push(Page::new(page_ref, layer_ref, size))
+        self.pages.push(Page::new(size, "Layer 1"))
     }
 
     /// Returns the number of pages in this document.
@@ -138,7 +107,7 @@ impl Renderer {
         self.pages.get_mut(idx)
     }
 
-    /// Returns a mutable reference to the first page of this document.
+    /// Returns a reference to the first page of this document.
     pub fn first_page(&self) -> &Page {
         &self.pages[0]
     }
@@ -159,89 +128,163 @@ impl Renderer {
         &mut self.pages[idx]
     }
 
-    /// Loads the font from the given data, adds it to the generated document and returns a
-    /// reference to it.
+    /// Adds a builtin font to the document and returns its ID.
     pub fn add_builtin_font(
-        &self,
+        &mut self,
         builtin: printpdf::BuiltinFont,
-    ) -> Result<printpdf::IndirectFontRef, Error> {
-        self.doc
-            .add_builtin_font(builtin)
-            .context("Failed to load PDF font")
+    ) -> Result<printpdf::FontId, Error> {
+        Ok(printpdf::FontId(format!("Builtin-{}", builtin_to_str(builtin))))
     }
 
-    /// Loads the font from the given data, adds it to the generated document and returns a
-    /// reference to it.
-    pub fn add_embedded_font(&self, data: &[u8]) -> Result<printpdf::IndirectFontRef, Error> {
-        self.doc
-            .add_external_font(data)
-            .context("Failed to load PDF font")
+    /// Adds an embedded font to the document and returns its ID.
+    pub fn add_embedded_font(&mut self, data: &[u8]) -> Result<printpdf::FontId, Error> {
+        let mut warnings = Vec::new();
+        if let Some(font) = printpdf::ParsedFont::from_bytes(data, 0, &mut warnings) {
+            Ok(self.doc.add_font(&font))
+        } else {
+            Err(Error::new("Failed to load PDF font", ErrorKind::InvalidFont))
+        }
     }
 
     /// Writes this PDF document to a writer.
-    pub fn write(self, w: impl io::Write) -> Result<(), Error> {
-        self.doc
-            .save(&mut io::BufWriter::new(w))
-            .context("Failed to save document")
+    pub fn write(mut self, w: impl io::Write) -> Result<(), Error> {
+        for page_data in self.pages {
+            let mut ops = Vec::new();
+            for layer in page_data.layers.0.into_inner() {
+                let layer_data = rc::Rc::try_unwrap(layer).unwrap();
+                let layer_id = self.doc.add_layer(&printpdf::Layer::new(&layer_data.name));
+                ops.push(printpdf::Op::BeginLayer { layer_id: layer_id.clone() });
+
+                for op in layer_data.ops.into_inner() {
+                    match op {
+                        MyOp::Pdf(o) => ops.push(o),
+                        #[cfg(feature = "images")]
+                        MyOp::Image(img, pos, scale, rot, dpi) => {
+                            use image::GenericImageView;
+                            let (width, height) = img.dimensions();
+                            let raw_image = printpdf::RawImage {
+                                pixels: printpdf::RawImageData::U8(img.to_rgb8().into_raw()),
+                                width: width as usize,
+                                height: height as usize,
+                                data_format: printpdf::RawImageFormat::RGB8,
+                                tag: Vec::new(),
+                            };
+                            let id = self.doc.add_image(&raw_image);
+                            ops.push(printpdf::Op::UseXobject {
+                                id,
+                                transform: printpdf::XObjectTransform {
+                                    translate_x: Some(pos.x.into()),
+                                    translate_y: Some(pos.y.into()),
+                                    rotate: Some(printpdf::XObjectRotation {
+                                        angle_ccw_degrees: rot.degrees,
+                                        rotation_center_x: printpdf::Px(width as usize / 2),
+                                        rotation_center_y: printpdf::Px(height as usize / 2),
+                                    }),
+                                    scale_x: Some(scale.x),
+                                    scale_y: Some(scale.y),
+                                    dpi,
+                                },
+                            });
+                        }
+                    }
+                }
+
+                ops.push(printpdf::Op::EndLayer { layer_id });
+            }
+            let page = printpdf::PdfPage::new(
+                page_data.size.width.into(),
+                page_data.size.height.into(),
+                ops,
+            );
+            self.doc.pages.push(page);
+        }
+        let mut warnings = Vec::new();
+        self.doc.save_writer(&mut io::BufWriter::new(w), &printpdf::PdfSaveOptions::default(), &mut warnings);
+        Ok(())
     }
 }
 
+fn builtin_to_str(builtin: printpdf::BuiltinFont) -> &'static str {
+    match builtin {
+        printpdf::BuiltinFont::TimesRoman => "TimesRoman",
+        printpdf::BuiltinFont::TimesBold => "TimesBold",
+        printpdf::BuiltinFont::TimesItalic => "TimesItalic",
+        printpdf::BuiltinFont::TimesBoldItalic => "TimesBoldItalic",
+        printpdf::BuiltinFont::Helvetica => "Helvetica",
+        printpdf::BuiltinFont::HelveticaBold => "HelveticaBold",
+        printpdf::BuiltinFont::HelveticaOblique => "HelveticaOblique",
+        printpdf::BuiltinFont::HelveticaBoldOblique => "HelveticaBoldOblique",
+        printpdf::BuiltinFont::Courier => "Courier",
+        printpdf::BuiltinFont::CourierBold => "CourierBold",
+        printpdf::BuiltinFont::CourierOblique => "CourierOblique",
+        printpdf::BuiltinFont::CourierBoldOblique => "CourierBoldOblique",
+        printpdf::BuiltinFont::Symbol => "Symbol",
+        printpdf::BuiltinFont::ZapfDingbats => "ZapfDingbats",
+    }
+}
+
+fn str_to_builtin(s: &str) -> printpdf::BuiltinFont {
+    match s {
+        "TimesRoman" => printpdf::BuiltinFont::TimesRoman,
+        "TimesBold" => printpdf::BuiltinFont::TimesBold,
+        "TimesItalic" => printpdf::BuiltinFont::TimesItalic,
+        "TimesBoldItalic" => printpdf::BuiltinFont::TimesBoldItalic,
+        "Helvetica" => printpdf::BuiltinFont::Helvetica,
+        "HelveticaBold" => printpdf::BuiltinFont::HelveticaBold,
+        "HelveticaOblique" => printpdf::BuiltinFont::HelveticaOblique,
+        "HelveticaBoldOblique" => printpdf::BuiltinFont::HelveticaBoldOblique,
+        "Courier" => printpdf::BuiltinFont::Courier,
+        "CourierBold" => printpdf::BuiltinFont::CourierBold,
+        "CourierOblique" => printpdf::BuiltinFont::CourierOblique,
+        "CourierBoldOblique" => printpdf::BuiltinFont::CourierBoldOblique,
+        "Symbol" => printpdf::BuiltinFont::Symbol,
+        "ZapfDingbats" => printpdf::BuiltinFont::ZapfDingbats,
+        _ => printpdf::BuiltinFont::Helvetica,
+    }
+}
+
+enum MyOp {
+    Pdf(printpdf::Op),
+    #[cfg(feature = "images")]
+    Image(image::DynamicImage, UserSpacePosition, Scale, Rotation, Option<f32>),
+}
+
 /// A page of a PDF document.
-///
-/// This is a wrapper around a [`printpdf::PdfPageReference`][].
-///
-/// [`printpdf::PdfPageReference`]: https://docs.rs/printpdf/0.3.2/printpdf/types/pdf_page/struct.PdfPageReference.html
 pub struct Page {
-    page: printpdf::PdfPageReference,
     size: Size,
     layers: Layers,
 }
 
 impl Page {
-    fn new(
-        page: printpdf::PdfPageReference,
-        layer: printpdf::PdfLayerReference,
-        size: Size,
-    ) -> Page {
+    fn new(size: Size, layer_name: &str) -> Page {
         Page {
-            page,
             size,
-            layers: Layers::new(layer),
+            layers: Layers::new(layer_name),
         }
     }
-
     /// Adds a new layer with the given name to the page.
     pub fn add_layer(&mut self, name: impl Into<String>) {
-        let layer = self.page.add_layer(name);
-        self.layers.push(layer);
+        self.layers.push(name.into());
     }
-
     /// Returns the number of layers on this page.
     pub fn layer_count(&self) -> usize {
         self.layers.len()
     }
-
     /// Returns a layer of this page.
     pub fn get_layer(&self, idx: usize) -> Option<Layer<'_>> {
         self.layers.get(idx).map(|l| Layer::new(self, l))
     }
-
     /// Returns the first layer of this page.
     pub fn first_layer(&self) -> Layer<'_> {
         Layer::new(self, self.layers.first())
     }
-
     /// Returns the last layer of this page.
     pub fn last_layer(&self) -> Layer<'_> {
         Layer::new(self, self.layers.last())
     }
-
-    fn next_layer(&self, layer: &printpdf::PdfLayerReference) -> Layer<'_> {
-        let layer = self.layers.next(layer).unwrap_or_else(|| {
-            let layer = self
-                .page
-                .add_layer(format!("Layer {}", self.layers.len() + 1));
-            self.layers.push(layer)
+    fn next_layer(&self, data: &rc::Rc<LayerData>) -> Layer<'_> {
+        let layer = self.layers.next(data).unwrap_or_else(|| {
+            self.layers.push(format!("Layer {}", self.layers.len() + 1))
         });
         Layer::new(self, layer)
     }
@@ -251,47 +294,34 @@ impl Page {
 struct Layers(cell::RefCell<Vec<rc::Rc<LayerData>>>);
 
 impl Layers {
-    pub fn new(layer: printpdf::PdfLayerReference) -> Self {
-        Self(vec![LayerData::from(layer).into()].into())
+    pub fn new(name: &str) -> Self {
+        Self(vec![LayerData::new(name).into()].into())
     }
-
     pub fn len(&self) -> usize {
         self.0.borrow().len()
     }
-
     pub fn first(&self) -> rc::Rc<LayerData> {
         self.0.borrow().first().unwrap().clone()
     }
-
     pub fn last(&self) -> rc::Rc<LayerData> {
         self.0.borrow().last().unwrap().clone()
     }
-
     pub fn get(&self, idx: usize) -> Option<rc::Rc<LayerData>> {
         self.0.borrow().get(idx).cloned()
     }
-
-    pub fn push(&self, layer: printpdf::PdfLayerReference) -> rc::Rc<LayerData> {
-        let layer_data = rc::Rc::from(LayerData::from(layer));
+    pub fn push(&self, name: String) -> rc::Rc<LayerData> {
+        let layer_data = rc::Rc::from(LayerData::new(&name));
         self.0.borrow_mut().push(layer_data.clone());
         layer_data
     }
-
-    pub fn next(&self, layer: &printpdf::PdfLayerReference) -> Option<rc::Rc<LayerData>> {
-        self.0
-            .borrow()
-            .iter()
-            .skip_while(|l| l.layer.layer != layer.layer)
-            .nth(1)
-            .cloned()
+    pub fn next(&self, data: &rc::Rc<LayerData>) -> Option<rc::Rc<LayerData>> {
+        let borrow = self.0.borrow();
+        let idx = borrow.iter().position(|l| rc::Rc::ptr_eq(l, data))?;
+        borrow.get(idx + 1).cloned()
     }
 }
 
 /// A layer of a page of a PDF document.
-///
-/// This is a wrapper around a [`printpdf::PdfLayerReference`][].
-///
-/// [`printpdf::PdfLayerReference`]: https://docs.rs/printpdf/0.3.2/printpdf/types/pdf_layer/struct.PdfLayerReference.html
 #[derive(Clone)]
 pub struct Layer<'p> {
     page: &'p Page,
@@ -302,180 +332,104 @@ impl<'p> Layer<'p> {
     fn new(page: &'p Page, data: rc::Rc<LayerData>) -> Layer<'p> {
         Layer { page, data }
     }
-
-    /// Returns the underlying `PdfLayerReference` for this layer.
-    pub fn layer(&self) -> &printpdf::PdfLayerReference {
-        &self.data.layer
-    }
-
     /// Returns the next layer of this page.
-    ///
-    /// If this layer is not the last layer, the existing next layer is used.  If it is the last
-    /// layer, a new layer is created and added to the page.
     pub fn next(&self) -> Layer<'p> {
-        self.page.next_layer(&self.data.layer)
+        self.page.next_layer(&self.data)
     }
-
     /// Returns a drawable area for this layer.
     pub fn area(&self) -> Area<'p> {
         Area::new(self.clone(), Position::default(), self.page.size)
     }
-
-    #[cfg(feature = "images")]
-    fn add_image(
-        &self,
-        image: &image::DynamicImage,
-        position: LayerPosition,
-        scale: Scale,
-        rotation: Rotation,
-        dpi: Option<f32>,
-    ) {
-        let dynamic_image = printpdf::Image::from_dynamic_image(image);
-        let position = self.transform_position(position);
-        let rotation = Some(printpdf::ImageRotation {
-            angle_ccw_degrees: rotation.degrees,
-            rotation_center_x: printpdf::Px(dynamic_image.image.width.0 / 2),
-            rotation_center_y: printpdf::Px(dynamic_image.image.height.0 / 2),
-        });
-        dynamic_image.add_to_layer(
-            self.data.layer.clone(),
-            printpdf::ImageTransform {
-                translate_x: Some(position.x.into()),
-                translate_y: Some(position.y.into()),
-                rotate: rotation,
-                scale_x: Some(scale.x),
-                scale_y: Some(scale.y),
-                dpi,
-            },
-        );
+    fn transform_position(&self, pos: LayerPosition) -> UserSpacePosition {
+        UserSpacePosition::from_layer(self, pos)
     }
-
+    fn set_fill_color(&self, color: Option<Color>) {
+        if let Some(color) = color {
+            self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::SetFillColor { col: color.into() }));
+        }
+    }
+    fn set_outline_color(&self, color: Option<Color>) {
+        if let Some(color) = color {
+            self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::SetOutlineColor { col: color.into() }));
+        }
+    }
+    fn set_outline_thickness(&self, thickness: Mm) {
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::SetOutlineThickness { pt: printpdf::Pt::from(thickness) }));
+    }
+    fn set_font(&self, font: &printpdf::FontId, font_size: u8) {
+        if font.0.starts_with("Builtin-") {
+            let builtin = str_to_builtin(&font.0[8..]);
+            self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::SetFontSizeBuiltinFont { size: printpdf::Pt(font_size as f32), font: builtin }));
+        } else {
+            self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::SetFontSize { size: printpdf::Pt(font_size as f32), font: font.clone() }));
+        }
+    }
+    fn add_line_break(&self) {
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::AddLineBreak));
+    }
+    fn set_text_cursor(&self, pos: Position) {
+        let pos = self.transform_position(LayerPosition(pos));
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::SetTextCursor { pos: printpdf::Point { x: pos.x.into(), y: pos.y.into() } }));
+    }
+    fn start_text_section(&self) {
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::StartTextSection));
+    }
+    fn end_text_section(&self) {
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::EndTextSection));
+    }
+    /// Adds an annotation to the layer.
+    pub fn add_annotation(&self, annotation: printpdf::LinkAnnotation) {
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::LinkAnnotation { link: annotation }));
+    }
     fn add_line_shape<I>(&self, points: I)
     where
         I: IntoIterator<Item = LayerPosition>,
     {
         let line_points: Vec<_> = points
             .into_iter()
-            .map(|pos| (self.transform_position(pos).into(), false))
+            .map(|pos| printpdf::LinePoint { p: self.transform_position(pos).into(), bezier: false })
             .collect();
-        let line = printpdf::Line {
-            points: line_points,
-            is_closed: false,
-        };
-        self.data.layer.add_line(line);
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::DrawLine { line: printpdf::Line { points: line_points, is_closed: false } }));
     }
-
-    fn set_fill_color(&self, color: Option<Color>) {
-        if self.data.update_fill_color(color) {
-            self.data
-                .layer
-                .set_fill_color(color.unwrap_or(Color::Rgb(0, 0, 0)).into());
-        }
+    #[cfg(feature = "images")]
+    fn add_image(&self, image: &image::DynamicImage, pos: LayerPosition, scale: Scale, rot: Rotation, dpi: Option<f32>) {
+        let pos = self.transform_position(pos);
+        self.data.ops.borrow_mut().push(MyOp::Image(image.clone(), pos, scale, rot, dpi));
     }
-
-    fn set_outline_thickness(&self, thickness: Mm) {
-        if self.data.update_outline_thickness(thickness) {
-            self.data
-                .layer
-                .set_outline_thickness(printpdf::Pt::from(thickness).0);
-        }
-    }
-
-    fn set_outline_color(&self, color: Color) {
-        if self.data.update_outline_color(color) {
-            self.data.layer.set_outline_color(color.into());
-        }
-    }
-
-    fn set_text_cursor(&self, cursor: LayerPosition) {
-        let cursor = self.transform_position(cursor);
-        self.data
-            .layer
-            .set_text_cursor(cursor.x.into(), cursor.y.into());
-    }
-
-    fn begin_text_section(&self) {
-        self.data.layer.begin_text_section();
-    }
-
-    fn end_text_section(&self) {
-        self.data.layer.end_text_section();
-    }
-
-    fn add_line_break(&self) {
-        self.data.layer.add_line_break();
-    }
-
-    fn set_line_height(&self, line_height: Mm) {
-        self.data.layer.set_line_height(line_height.0);
-    }
-
-    fn set_font(&self, font: &printpdf::IndirectFontRef, font_size: u8) {
-        self.data.layer.set_font(font, font_size.into());
-    }
-
-    fn write_positioned_codepoints<P, C>(&self, positions: P, codepoints: C)
+    fn write_positioned_codepoints<I1, I2, I3>(&self, font: &printpdf::FontId, positions: I1, codepoints: I2, chars: I3)
     where
-        P: IntoIterator<Item = i64>,
-        C: IntoIterator<Item = u16>,
+        I1: IntoIterator<Item = i64>,
+        I2: IntoIterator<Item = u16>,
+        I3: IntoIterator<Item = char>,
     {
-        self.data
-            .layer
-            .write_positioned_codepoints(positions.into_iter().zip(codepoints.into_iter()));
-    }
-
-    /// Transforms the given position that is relative to the upper left corner of the layer to a
-    /// position that is relative to the lower left corner of the layer (as used by `printpdf`).
-    fn transform_position(&self, position: LayerPosition) -> UserSpacePosition {
-        UserSpacePosition::from_layer(self, position)
-    }
-
-    /// Adds a link annotation to the layer.
-    pub fn add_annotation(&mut self, annotation: printpdf::LinkAnnotation) {
-        self.data.layer.add_link_annotation(annotation);
+        let cpk: Vec<_> = positions.into_iter().zip(codepoints.into_iter()).zip(chars.into_iter())
+            .map(|((p, cp), c)| (p, cp, c))
+            .collect();
+        self.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::WriteCodepointsWithKerning { font: font.clone(), cpk }));
     }
 }
 
-#[derive(Debug)]
 struct LayerData {
-    layer: printpdf::PdfLayerReference,
-    fill_color: cell::Cell<Color>,
-    outline_color: cell::Cell<Color>,
-    outline_thickness: cell::Cell<Mm>,
+    name: String,
+    ops: cell::RefCell<Vec<MyOp>>,
+}
+
+impl std::fmt::Debug for LayerData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerData").field("name", &self.name).finish()
+    }
 }
 
 impl LayerData {
-    pub fn update_fill_color(&self, color: Option<Color>) -> bool {
-        let color = color.unwrap_or(Color::Rgb(0, 0, 0));
-        self.fill_color.replace(color) != color
-    }
-
-    pub fn update_outline_color(&self, color: Color) -> bool {
-        self.outline_color.replace(color) != color
-    }
-
-    pub fn update_outline_thickness(&self, thickness: Mm) -> bool {
-        self.outline_thickness.replace(thickness) != thickness
-    }
-}
-
-impl From<printpdf::PdfLayerReference> for LayerData {
-    fn from(layer: printpdf::PdfLayerReference) -> Self {
+    fn new(name: &str) -> Self {
         Self {
-            layer,
-            fill_color: Color::Rgb(0, 0, 0).into(),
-            outline_color: Color::Rgb(0, 0, 0).into(),
-            outline_thickness: Mm::from(printpdf::Pt(1.0)).into(),
+            name: name.to_string(),
+            ops: cell::RefCell::new(Vec::new()),
         }
     }
 }
 
-/// A view on an area of a PDF layer that can be drawn on.
-///
-/// This struct provides access to the drawing methods of a [`printpdf::PdfLayerReference`][].  It
-/// is defined by the layer that is drawn on and the origin and the size of the area.
-///
-/// [`printpdf::PdfLayerReference`]: https://docs.rs/printpdf/0.3.2/printpdf/types/pdf_layer/struct.PdfLayerReference.html
+/// A drawable area.
 #[derive(Clone)]
 pub struct Area<'p> {
     layer: Layer<'p>,
@@ -485,262 +439,196 @@ pub struct Area<'p> {
 
 impl<'p> Area<'p> {
     fn new(layer: Layer<'p>, origin: Position, size: Size) -> Area<'p> {
-        Area {
-            layer,
-            origin,
-            size,
-        }
+        Area { layer, origin, size }
     }
-
-    /// Returns a copy of this area on the next layer of the page.
-    ///
-    /// If this area is not on the last layer, the existing next layer is used.  If it is on the
-    /// last layer, a new layer is created and added to the page.
-    pub fn next_layer(&self) -> Self {
-        let layer = self.layer.next();
-        Self {
-            layer,
-            origin: self.origin,
-            size: self.size,
-        }
-    }
-
-    /// Reduces the size of the drawable area by the given margins.
-    pub fn add_margins(&mut self, margins: impl Into<Margins>) {
-        let margins = margins.into();
-        self.origin.x += margins.left;
-        self.origin.y += margins.top;
-        self.size.width -= margins.left + margins.right;
-        self.size.height -= margins.top + margins.bottom;
-    }
-
     /// Returns the size of this area.
     pub fn size(&self) -> Size {
         self.size
     }
-
-    /// Adds the given offset to the area, reducing the drawable area.
+    /// Returns the layer this area belongs to.
+    pub fn layer(&self) -> &Layer<'p> {
+        &self.layer
+    }
+    /// Returns the origin of this area relative to the top left corner of the layer.
+    pub fn origin(&self) -> Position {
+        self.origin
+    }
+    /// Returns a sub-area of this area.
+    pub fn sub_area(&self, margins: impl Into<Margins>) -> Area<'p> {
+        let margins = margins.into();
+        Area::new(
+            self.layer.clone(),
+            self.origin + Position::new(margins.left, margins.top),
+            Size::new(
+                self.size.width - margins.left - margins.right,
+                self.size.height - margins.top - margins.bottom,
+            ),
+        )
+    }
+    /// Adds margins to the area.
+    pub fn add_margins(&mut self, margins: impl Into<Margins>) {
+        let margins = margins.into();
+        self.origin += Position::new(margins.left, margins.top);
+        self.size.width -= margins.left + margins.right;
+        self.size.height -= margins.top + margins.bottom;
+    }
+    /// Adds an offset to the area.
     pub fn add_offset(&mut self, offset: impl Into<Position>) {
         let offset = offset.into();
-        self.origin.x += offset.x;
-        self.origin.y += offset.y;
+        self.origin += offset;
         self.size.width -= offset.x;
         self.size.height -= offset.y;
     }
-
-    /// Sets the size of this area.
-    pub fn set_size(&mut self, size: impl Into<Size>) {
-        self.size = size.into();
+    /// Sets the height of the area.
+    pub fn set_height(&mut self, height: impl Into<Mm>) {
+        self.size.height = height.into();
     }
-
-    /// Sets the width of this area.
-    pub fn set_width(&mut self, width: Mm) {
-        self.size.width = width;
+    /// Sets the fill color.
+    pub fn set_fill_color(&self, color: impl Into<Option<Color>>) {
+        self.layer.set_fill_color(color.into());
     }
-
-    /// Sets the height of this area.
-    pub fn set_height(&mut self, height: Mm) {
-        self.size.height = height;
+    /// Sets the outline color.
+    pub fn set_outline_color(&self, color: impl Into<Option<Color>>) {
+        self.layer.set_outline_color(color.into());
     }
-
-    /// Splits this area horizontally using the given weights.
-    ///
-    /// The returned vector has the same number of elements as the provided slice.  The width of
-    /// the *i*-th area is *width \* weights[i] / total_weight*, where *width* is the width of this
-    /// area, and *total_weight* is the sum of all given weights.
+    /// Sets the outline thickness.
+    pub fn set_outline_thickness(&self, thickness: impl Into<Mm>) {
+        self.layer.set_outline_thickness(thickness.into());
+    }
+    /// Draws a line.
+    pub fn draw_line(&self, points: Vec<Position>, style: LineStyle) {
+        self.set_outline_color(style.color());
+        self.set_outline_thickness(style.thickness());
+        self.layer.add_line_shape(points.into_iter().map(|p| LayerPosition::from_area(self, p)));
+    }
+    /// Draws a rectangle.
+    pub fn draw_rect(&self, size: Size, position: Position, style: LineStyle) {
+        self.draw_line(
+            vec![
+                position,
+                position + Position::new(size.width, 0),
+                position + Position::new(size.width, size.height),
+                position + Position::new(0, size.height),
+                position,
+            ],
+            style,
+        );
+    }
+    /// Adds an image to the area.
+    #[cfg(feature = "images")]
+    pub fn add_image(&self, image: &image::DynamicImage, pos: Position, scale: Scale, rot: Rotation, dpi: Option<f32>) {
+        self.layer.add_image(image, LayerPosition::from_area(self, pos), scale, rot, dpi);
+    }
+    /// Returns a new text section for this area.
+    pub fn text_section<'a>(&'a self, font_cache: &'a fonts::FontCache, _position: Position, _metrics: fonts::Metrics) -> Option<TextSection<'a, 'p>> where 'a: 'p {
+        Some(TextSection::new(self, font_cache))
+    }
+    /// Prints a string to the area.
+    pub fn print_str(
+        &self,
+        font_cache: &fonts::FontCache,
+        position: Position,
+        style: Style,
+        s: &str,
+    ) -> Result<bool, Error> {
+        self.layer.set_text_cursor(self.position(position));
+        let mut section = TextSection::new(self, font_cache);
+        section.print_str(s, style)?;
+        Ok(true)
+    }
+    /// Splits the area horizontally.
     pub fn split_horizontally(&self, weights: &[usize]) -> Vec<Area<'p>> {
         let total_weight: usize = weights.iter().sum();
-        let factor = self.size.width / total_weight as f32;
-        let widths = weights.iter().map(|weight| factor * *weight as f32);
-        let mut offset = Mm(0.0);
         let mut areas = Vec::new();
-        for width in widths {
-            let mut area = self.clone();
-            area.origin.x += offset;
-            area.size.width = width;
-            areas.push(area);
-            offset += width;
+        let mut x_offset = Mm::default();
+        for weight in weights {
+            let width = self.size.width * ((*weight as f32) / (total_weight as f32));
+            areas.push(Area::new(
+                self.layer.clone(),
+                self.origin + Position::new(x_offset, Mm::default()),
+                Size::new(width, self.size.height),
+            ));
+            x_offset += width;
         }
         areas
     }
-
-    /// Inserts an image into the document.
-    ///
-    /// *Only available if the `images` feature is enabled.*
-    ///
-    /// The position is assumed to be relative to the upper left hand corner of the area.
-    /// Your position will need to compensate for rotation/scale/dpi. Using [`Image`][]'s
-    /// render functionality will do this for you and is the recommended way to
-    /// insert an image into an Area.
-    ///
-    /// [`Image`]: ../elements/struct.Image.html
-    #[cfg(feature = "images")]
-    pub fn add_image(
-        &self,
-        image: &image::DynamicImage,
-        position: Position,
-        scale: Scale,
-        rotation: Rotation,
-        dpi: Option<f32>,
-    ) {
-        self.layer
-            .add_image(image, self.position(position), scale, rotation, dpi);
-    }
-
-    /// Draws a line with the given points and the given line style.
-    ///
-    /// The points are relative to the upper left corner of the area.
-    pub fn draw_line<I>(&self, points: I, line_style: LineStyle)
-    where
-        I: IntoIterator<Item = Position>,
-    {
-        self.layer.set_outline_thickness(line_style.thickness());
-        self.layer.set_outline_color(line_style.color());
-        self.layer
-            .add_line_shape(points.into_iter().map(|pos| self.position(pos)));
-    }
-
-    /// Tries to draw the given string at the given position and returns `true` if the area was
-    /// large enough to draw the string.
-    ///
-    /// The font cache must contain the PDF font for the font set in the style.  The position is
-    /// relative to the upper left corner of the area.
-    pub fn print_str<S: AsRef<str>>(
-        &self,
-        font_cache: &fonts::FontCache,
-        position: Position,
-        style: Style,
-        s: S,
-    ) -> Result<bool, Error> {
-        if let Some(mut section) =
-            self.text_section(font_cache, position, style.metrics(font_cache))
-        {
-            section.print_str(s, style)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Creates a new text section at the given position if the text section fits in this area.
-    ///
-    /// The given style is only used to calculate the line height of the section.  The position is
-    /// relative to the upper left corner of the area.  The font cache must contain the PDF font
-    /// for all fonts printed with the text section.
-    pub fn text_section<'f>(
-        &self,
-        font_cache: &'f fonts::FontCache,
-        position: Position,
-        metrics: fonts::Metrics,
-    ) -> Option<TextSection<'f, 'p>> {
-        let mut area = self.clone();
-        area.add_offset(position);
-        TextSection::new(font_cache, area, metrics)
-    }
-
-    /// Returns a position relative to the top left corner of this area.
-    fn position(&self, position: Position) -> LayerPosition {
-        LayerPosition::from_area(self, position)
-    }
-
-    /// Adds a clickable link to the document.
-    ///
-    /// The font cache must contain the PDF font for the font set in the style.  The position is
-    /// relative to the upper left corner of the area.
-    pub fn add_link<S: AsRef<str>>(
-        &self,
-        font_cache: &fonts::FontCache,
-        position: Position,
-        style: Style,
-        text: S,
-        uri: S,
-    ) -> Result<bool, Error> {
-        if let Some(mut section) =
-            self.text_section(font_cache, position, style.metrics(font_cache))
-        {
-            section.add_link(text, uri, style)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    fn position(&self, position: Position) -> Position {
+        self.origin + position
     }
 }
 
-/// A text section that is drawn on an area of a PDF layer.
+/// A section of text.
 pub struct TextSection<'f, 'p> {
+    area: &'p Area<'p>,
     font_cache: &'f fonts::FontCache,
-    area: Area<'p>,
-    is_first: bool,
     metrics: fonts::Metrics,
-    font: Option<(printpdf::IndirectFontRef, u8)>,
     current_x_offset: Mm,
     cumulative_kerning: Mm,
+    is_first: bool,
 }
 
 impl<'f, 'p> TextSection<'f, 'p> {
-    fn new(
-        font_cache: &'f fonts::FontCache,
-        area: Area<'p>,
-        metrics: fonts::Metrics,
-    ) -> Option<TextSection<'f, 'p>> {
-        if metrics.glyph_height > area.size.height {
-            return None;
-        }
-
-        area.layer.begin_text_section();
-        area.layer.set_line_height(metrics.line_height);
-
-        Some(TextSection {
-            font_cache,
+    fn new(area: &'p Area<'p>, font_cache: &'f fonts::FontCache) -> Self {
+        area.layer.start_text_section();
+        let font = font_cache.default_font_family().regular;
+        let style = Style::new();
+        let metrics = font.metrics(style.font_size());
+        Self {
             area,
-            is_first: true,
+            font_cache,
             metrics,
-            font: None,
-            current_x_offset: Mm(0.0),
-            cumulative_kerning: Mm(0.0),
-        })
-    }
-
-    fn set_text_cursor(&self, x_offset: Mm) {
-        let cursor = self
-            .area
-            .position(Position::new(x_offset, self.metrics.ascent));
-        self.area.layer.set_text_cursor(cursor);
-    }
-
-    fn set_font(&mut self, font: &printpdf::IndirectFontRef, font_size: u8) {
-        let font_is_set = self
-            .font
-            .as_ref()
-            .map(|(font, font_size)| (font, *font_size))
-            .map(|data| data == (font, font_size))
-            .unwrap_or_default();
-        if !font_is_set {
-            self.font = Some((font.clone(), font_size));
-            self.area.layer.set_font(font, font_size);
+            current_x_offset: Mm::default(),
+            cumulative_kerning: Mm::default(),
+            is_first: true,
         }
     }
-
-    /// Tries to add a new line and returns `true` if the area was large enough to fit the new
-    /// line.
-    #[must_use]
-    pub fn add_newline(&mut self) -> bool {
+    /// Sets the text cursor.
+    pub fn set_text_cursor(&mut self, offset: impl Into<Mm>) {
+        let offset = offset.into();
+        self.current_x_offset = offset;
+        self.cumulative_kerning = Mm::default();
+        self.area.layer.set_text_cursor(self.area.position(Position::new(
+            self.current_x_offset + self.cumulative_kerning,
+            self.metrics.ascent,
+        )));
+    }
+    /// Adds a line break.
+    pub fn add_line_break(&mut self) -> bool {
         if self.metrics.line_height > self.area.size.height {
             false
         } else {
             self.area.layer.add_line_break();
-            self.area.add_offset((0, self.metrics.line_height));
             true
         }
     }
-
-    /// Prints the given string with the given style.
-    ///
-    /// The font cache for this text section must contain the PDF font for the given style.
+    /// Adds a link.
+    pub fn add_link(&mut self, text: impl AsRef<str>, uri: String, style: Style) -> Result<(), Error> {
+        let font = style.font(self.font_cache);
+        let text = text.as_ref();
+        let start_x = self.current_x_offset + self.cumulative_kerning;
+        let current_pos = self.area.position(Position::new(start_x, Mm::default()));
+        let pdf_pos = self.area.layer.transform_position(LayerPosition(current_pos));
+        let text_width = style.text_width(self.font_cache, text);
+        let rect = printpdf::Rect {
+            x: pdf_pos.x.into(),
+            y: printpdf::Pt(pdf_pos.y.0 - font.ascent(style.font_size()).0),
+            width: text_width.into(),
+            height: printpdf::Pt(font.ascent(style.font_size()).0 - font.descent(style.font_size()).0),
+        };
+        let annotation = printpdf::LinkAnnotation::new(
+            rect,
+            printpdf::Actions::uri(uri),
+            None,
+            None,
+            None,
+        );
+        self.area.layer.add_annotation(annotation);
+        self.print_str(text, style)
+    }
+    /// Prints a string.
     pub fn print_str(&mut self, s: impl AsRef<str>, style: Style) -> Result<(), Error> {
         let font = style.font(self.font_cache);
         let s = s.as_ref();
-
         if self.is_first {
             if let Some(first_c) = s.chars().next() {
                 let x_offset = style.char_left_side_bearing(self.font_cache, first_c) * -1.0;
@@ -748,208 +636,25 @@ impl<'f, 'p> TextSection<'f, 'p> {
             }
             self.is_first = false;
         }
-
-        let pdf_font = self
-            .font_cache
-            .get_pdf_font(font)
-            .expect("Could not find PDF font in font cache");
+        let pdf_font = self.font_cache.get_pdf_font(font).expect("Could not find PDF font in font cache");
         self.area.layer.set_fill_color(style.color());
-        self.set_font(pdf_font, style.font_size());
-
-        // Store starting position for underline/strikethrough
-        let start_x = self.current_x_offset + self.cumulative_kerning;
+        self.area.layer.set_font(pdf_font, style.font_size());
         let text_width = style.text_width(self.font_cache, s);
 
-        // For built-in fonts, emit text as whole words/strings to avoid character-by-character spacing
-        if font.is_builtin() {
-            // Use simple text emission for built-in fonts
-            // This avoids the character-by-character positioning that causes spacing issues
-            self.area.layer.data.layer.write_text(s, pdf_font);
+        if pdf_font.0.starts_with("Builtin-") {
+            let builtin = str_to_builtin(&pdf_font.0[8..]);
+            self.area.layer.data.ops.borrow_mut().push(MyOp::Pdf(printpdf::Op::WriteTextBuiltinFont {
+                items: vec![printpdf::TextItem::Text(s.to_string())],
+                font: builtin,
+            }));
         } else {
-            // For embedded fonts, we still need precise positioning for proper kerning
             let kerning_positions = font.kerning(self.font_cache, s.chars());
-            let positions = kerning_positions
-                .clone()
-                .into_iter()
-                .map(|pos| (-pos * 1000.0) as i64);
+            let positions = kerning_positions.into_iter().map(|pos| (-pos * 1000.0) as i64);
             let codepoints = font.glyph_ids(&self.font_cache, s.chars());
-
-            self.area
-                .layer
-                .write_positioned_codepoints(positions, codepoints);
+            self.area.layer.write_positioned_codepoints(pdf_font, positions, codepoints, s.chars());
         }
 
-        // Draw underline if enabled
-        if style.is_underline() {
-            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
-            // Position just below baseline
-            let underline_y = self.metrics.ascent + Mm(style.font_size() as f32 * 0.06);
-            let line_style = LineStyle::new()
-                .with_thickness(line_thickness)
-                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
-
-            self.area.draw_line(
-                vec![
-                    Position::new(start_x, underline_y),
-                    Position::new(start_x + text_width, underline_y),
-                ],
-                line_style,
-            );
-        }
-
-        // Draw strikethrough if enabled
-        if style.is_strikethrough() {
-            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
-            // Position at middle of x-height (roughly middle of lowercase letters)
-            let strikethrough_y = self.metrics.ascent * 0.75;
-            let line_style = LineStyle::new()
-                .with_thickness(line_thickness)
-                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
-
-            self.area.draw_line(
-                vec![
-                    Position::new(start_x, strikethrough_y),
-                    Position::new(start_x + text_width, strikethrough_y),
-                ],
-                line_style,
-            );
-        }
-
-        // Update position tracking
         self.current_x_offset += text_width;
-
-        // For built-in fonts, we don't need kerning tracking since PDF viewers handle it
-        if !font.is_builtin() {
-            let kerning_positions = font.kerning(self.font_cache, s.chars());
-            let kerning_sum = Mm(kerning_positions.iter().sum::<f32>());
-            self.cumulative_kerning += kerning_sum;
-        }
-
-        Ok(())
-    }
-
-    /// Adds a clickable link with the given text, URI, and style.
-    ///
-    /// The font cache for this text section must contain the PDF font for the given style.
-    pub fn add_link(
-        &mut self,
-        text: impl AsRef<str>,
-        uri: impl AsRef<str>,
-        style: Style,
-    ) -> Result<(), Error> {
-        let font = style.font(self.font_cache);
-        let text = text.as_ref();
-        let uri = uri.as_ref();
-
-        let kerning_positions: Vec<f32> = font.kerning(self.font_cache, text.chars());
-
-        // Get current cursor position, including all accumulated offsets
-        let start_x = self.current_x_offset + self.cumulative_kerning;
-        let current_pos = self.area.position(Position::new(start_x, 0.0));
-
-        let pdf_pos = self.area.layer.transform_position(current_pos);
-        let text_width = style.text_width(self.font_cache, text);
-        let rect = printpdf::Rect::new(
-            printpdf::Mm(pdf_pos.x.0),                                     // left
-            printpdf::Mm(pdf_pos.y.0 - font.ascent(style.font_size()).0),  // bottom
-            printpdf::Mm(pdf_pos.x.0 + text_width.0),                      // right
-            printpdf::Mm(pdf_pos.y.0 + font.descent(style.font_size()).0), // top
-        );
-
-        let annotation = printpdf::LinkAnnotation::new(
-            rect,
-            Some(printpdf::BorderArray::Solid([0.0, 0.0, 0.0])), // No border
-            Some(printpdf::ColorArray::Transparent),             // Transparent color
-            printpdf::Actions::uri(uri.to_string()),
-            None,
-        );
-        self.area.layer.add_annotation(annotation);
-
-        // Handle first character positioning
-        if self.is_first {
-            if let Some(first_c) = text.chars().next() {
-                let x_offset = style.char_left_side_bearing(self.font_cache, first_c) * -1.0;
-                self.set_text_cursor(x_offset);
-            }
-            self.is_first = false;
-        }
-
-        let positions = kerning_positions
-            .clone()
-            .into_iter()
-            .map(|pos| (-pos * 1000.0) as i64);
-
-        let codepoints = if font.is_builtin() {
-            encode_win1252(text)?
-        } else {
-            font.glyph_ids(&self.font_cache, text.chars())
-        };
-
-        let pdf_font = self
-            .font_cache
-            .get_pdf_font(font)
-            .expect("Could not find PDF font in font cache");
-
-        self.area.layer.set_fill_color(style.color());
-        self.set_font(pdf_font, style.font_size());
-
-        // For built-in fonts, emit text as whole words/strings to avoid character-by-character spacing
-        if font.is_builtin() {
-            // Use simple text emission for built-in fonts
-            // This avoids the character-by-character positioning that causes spacing issues
-            self.area.layer.data.layer.write_text(text, pdf_font);
-        } else {
-            // For embedded fonts, we still need precise positioning for proper kerning
-            self.area
-                .layer
-                .write_positioned_codepoints(positions, codepoints);
-        }
-
-        // Draw underline if enabled
-        if style.is_underline() {
-            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
-            // Position just below baseline
-            let underline_y = self.metrics.ascent + Mm(style.font_size() as f32 * 0.06);
-            let line_style = LineStyle::new()
-                .with_thickness(line_thickness)
-                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
-
-            self.area.draw_line(
-                vec![
-                    Position::new(start_x, underline_y),
-                    Position::new(start_x + text_width, underline_y),
-                ],
-                line_style,
-            );
-        }
-
-        // Draw strikethrough if enabled
-        if style.is_strikethrough() {
-            let line_thickness = Mm(style.font_size() as f32 * 0.05); // 5% of font size
-            // Position at middle of x-height (roughly middle of lowercase letters)
-            let strikethrough_y = self.metrics.ascent * 0.75;
-            let line_style = LineStyle::new()
-                .with_thickness(line_thickness)
-                .with_color(style.color().unwrap_or(Color::Rgb(0, 0, 0)));
-
-            self.area.draw_line(
-                vec![
-                    Position::new(start_x, strikethrough_y),
-                    Position::new(start_x + text_width, strikethrough_y),
-                ],
-                line_style,
-            );
-        }
-
-        // Update position tracking
-        self.current_x_offset += text_width;
-
-        // For built-in fonts, we don't need kerning tracking since PDF viewers handle it
-        if !font.is_builtin() {
-            let kerning_sum = Mm(kerning_positions.iter().sum::<f32>());
-            self.cumulative_kerning += kerning_sum;
-        }
-
         Ok(())
     }
 }
@@ -957,28 +662,5 @@ impl<'f, 'p> TextSection<'f, 'p> {
 impl<'f, 'p> Drop for TextSection<'f, 'p> {
     fn drop(&mut self) {
         self.area.layer.end_text_section();
-    }
-}
-
-/// Encodes the given string using the Windows-1252 encoding for use with built-in PDF fonts,
-/// returning an error if it contains unsupported characters.
-fn encode_win1252(s: &str) -> Result<Vec<u16>, Error> {
-    let bytes: Vec<_> = lopdf::Document::encode_text(Some("WinAnsiEncoding"), s)
-        .into_iter()
-        .map(u16::from)
-        .collect();
-
-    // Windows-1252 is a single-byte encoding, so one byte is one character.
-    if bytes.len() != s.chars().count() {
-        Err(Error::new(
-            format!(
-                "Tried to print a string with characters that are not supported by the \
-                Windows-1252 encoding with a built-in font: {}",
-                s
-            ),
-            ErrorKind::UnsupportedEncoding,
-        ))
-    } else {
-        Ok(bytes)
     }
 }
