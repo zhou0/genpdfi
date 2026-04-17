@@ -1,0 +1,278 @@
+# Instincts generated from https://github.com/zhou0/genpdfi
+# Generated: 2026-04-17T08:16:20.034Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: genpdfi-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/zhou0/genpdfi
+---
+
+# Genpdfi Commit Length
+
+## Action
+
+Keep commit messages concise (~43 characters)
+
+## Evidence
+
+- Average commit message length: 43 chars
+- Based on 1 commits
+
+---
+id: genpdfi-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/zhou0/genpdfi
+---
+
+# Genpdfi Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: genpdfi-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/zhou0/genpdfi
+---
+
+# Genpdfi Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: genpdfi-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/zhou0/genpdfi
+---
+
+# Genpdfi Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: genpdfi-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/zhou0/genpdfi
+---
+
+# Genpdfi Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: genpdfi-instinct-filename-camelcase
+trigger: "When creating a new source file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Filename Camelcase
+
+## Action
+
+Name the file using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.files: camelCase
+
+---
+id: genpdfi-instinct-function-camelcase
+trigger: "When defining a new function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Function Camelcase
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: genpdfi-instinct-class-pascalcase
+trigger: "When defining a new class or struct"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Class Pascalcase
+
+## Action
+
+Name the class or struct using PascalCase
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: genpdfi-instinct-constant-screaming-snake-case
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Constant Screaming Snake Case
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: genpdfi-instinct-import-relative
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Import Relative
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: genpdfi-instinct-export-named
+trigger: "When exporting functions or types"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Export Named
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: genpdfi-instinct-test-location-separate
+trigger: "When adding or updating tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Test Location Separate
+
+## Action
+
+Place tests in a separate folder from source code
+
+## Evidence
+
+- Pattern in architecture.testLocation: separate
+
+---
+id: genpdfi-instinct-git-freeform-commits
+trigger: "When writing a commit message"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Git Freeform Commits
+
+## Action
+
+Use a freeform message without a required prefix
+
+## Evidence
+
+- Pattern in commits.type: freeform
+- Example: 'Upgrade printpdf to 0.8.0 and lopdf to 0.31'
+
+---
+id: genpdfi-instinct-git-commit-length
+trigger: "When composing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: zhou0/genpdfi
+---
+
+# Genpdfi Instinct Git Commit Length
+
+## Action
+
+Keep the commit message concise, around 43 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength: 43
+
