@@ -422,8 +422,8 @@ pub struct Document {
     paper_size: Size,
     decorator: Option<Box<dyn PageDecorator>>,
     conformance: Option<printpdf::PdfConformance>,
-    creation_date: Option<printpdf::OffsetDateTime>,
-    modification_date: Option<printpdf::OffsetDateTime>,
+    creation_date: Option<printpdf::DateTime>,
+    modification_date: Option<printpdf::DateTime>,
 }
 
 impl Document {
@@ -537,12 +537,12 @@ impl Document {
     }
 
     /// Sets the creation date of the PDF file.
-    pub fn set_creation_date(&mut self, date: printpdf::OffsetDateTime) {
+    pub fn set_creation_date(&mut self, date: printpdf::DateTime) {
         self.creation_date = Some(date);
     }
 
     /// Sets the modification date of the PDF file.
-    pub fn set_modification_date(&mut self, date: printpdf::OffsetDateTime) {
+    pub fn set_modification_date(&mut self, date: printpdf::DateTime) {
         self.modification_date = Some(date);
     }
 
@@ -574,7 +574,7 @@ impl Document {
         if let Some(modification_date) = self.modification_date {
             renderer = renderer.with_modification_date(modification_date);
         }
-        self.context.font_cache.load_pdf_fonts(&renderer)?;
+        self.context.font_cache.load_pdf_fonts(&mut renderer)?;
         loop {
             let mut area = renderer.last_page().last_layer().area();
             if let Some(decorator) = &mut self.decorator {
